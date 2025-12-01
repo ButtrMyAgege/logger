@@ -1,1 +1,172 @@
+// monitor.js - Fetches Bybit P2P rates and saves to files
 
+const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const API_KEY = process.env.BYBIT_API_KEY;
+const API_SECRET = process.env.BYBIT_API_SECRET;
+
+// Create data directory if it doesn't exist
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir);
+}
+
+const jsonFile = path.join(dataDir, 'rates.json');
+const csvFile = path.join(dataDir, 'rates.csv');
+
+// Generate signature for authenticated requests (if needed)
+function generateSignature(params, secret) {
+  const sortedParams = Object.keys(params)
+    .sort()
+    .map(key => `${key}=${params[key]}`)
+    .join('&');
+  
+  return crypto
+    .createHmac('sha256', secret)
+    .update(sortedParams)
+    .digest('hex');
+}
+
+async function fetchBybitRates() {
+  try {
+    console.log('Fetching Bybit P2P rates...');
+    
+    // Bybit P2P endpoint (public, no auth needed for viewing)
+    const response = await fetch('https://api2.bybit.com/fiat/otc/item/online', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: '',
+        tokenId: 'USDT',
+        currencyId: 'NGN',
+        payment: [],
+        side: '1', // 1 = buy, 0 = sell
+        size: '10',
+        page: '1',
+        amount: ''
+      })
+    });
+
+    const data = await response.json();
+    
+    if (!data.result || !data.result.items || data.result.items.length === 0) {
+      throw new Error('No data received from Bybit API');
+    }
+
+    // Extract rates
+    const rates = data.result.items.map(item => parseFloat(item.price));
+    const buyRate = Math.min(...rates);
+    const sellRate = Math.max(...rates);
+    const avgRate = rates.reduce((a, b) => a + b, 0) / rates.length;
+    const spread = sellRate - buyRate;
+
+    const entry = {
+      timestamp: new Date().toISOString(),
+      date: new Date().toLocaleDateString(),
+      time: new Date().toLocaleTimeString(),
+      buyRate: buyRate.toFixed(2),
+      sellRate: sellRate.toFixed(2),
+      avgRate: avgRate.toFixed(2),
+      spread: spread.toFixed(2),
+      volume: data.result.items.length
+    };
+
+    console.log('Rate fetched:', entry);
+    return entry;
+    
+  } catch (error) {
+    console.error('Error fetching rates:', error);
+    throw error;
+  }
+}
+
+function saveToJSON(entry) {
+  let data = [];
+  
+  // Read existing data
+  if (fs.existsSync(jsonFile)) {
+    data = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+  }
+  
+  // Add new entry
+  data.push(entry);
+  
+  // Save back to file
+  fs.writeFileSync(jsonFile, JSON.stringify(data, null, 2));
+  console.log(`Saved to ${jsonFile}`);
+}
+
+function saveToCSV(entry) {
+  const headers = 'Timestamp,Date,Time,Buy Rate,Sell Rate,Avg Rate,Spread,Volume\n';
+  const row = `${entry.timestamp},${entry.date},${entry.time},${entry.buyRate},${entry.sellRate},${entry.avgRate},${entry.spread},${entry.volume}\n`;
+  
+  // Create file with headers if it doesn't exist
+  if (!fs.existsSync(csvFile)) {
+    fs.writeFileSync(csvFile, headers);
+  }
+  
+  // Append new row
+  fs.appendFileSync(csvFile, row);
+  console.log(`Saved to ${csvFile}`);
+}
+
+function generateAnalytics() {
+  if (!fs.existsSync(jsonFile)) {
+    return;
+  }
+
+  const data = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+  
+  if (data.length < 2) {
+    return;
+  }
+
+  const buyRates = data.map(d => parseFloat(d.buyRate));
+  const sellRates = data.map(d => parseFloat(d.sellRate));
+  
+  const analytics = {
+    totalEntries: data.length,
+    dateRange: {
+      first: data[0].timestamp,
+      last: data[data.length - 1].timestamp
+    },
+    buyRates: {
+      min: Math.min(...buyRates).toFixed(2),
+      max: Math.max(...buyRates).toFixed(2),
+      avg: (buyRates.reduce((a, b) => a + b, 0) / buyRates.length).toFixed(2)
+    },
+    sellRates: {
+      min: Math.min(...sellRates).toFixed(2),
+      max: Math.max(...sellRates).toFixed(2),
+      avg: (sellRates.reduce((a, b) => a + b, 0) / sellRates.length).toFixed(2)
+    },
+    bestBuyTime: data.find(d => parseFloat(d.buyRate) === Math.min(...buyRates))?.timestamp,
+    bestSellTime: data.find(d => parseFloat(d.sellRate) === Math.max(...sellRates))?.timestamp,
+    profitPotential: ((Math.max(...sellRates) - Math.min(...buyRates)) / Math.min(...buyRates) * 100).toFixed(2) + '%'
+  };
+
+  const analyticsFile = path.join(dataDir, 'analytics.json');
+  fs.writeFileSync(analyticsFile, JSON.stringify(analytics, null, 2));
+  console.log('Analytics generated:', analytics);
+}
+
+// Main execution
+async function main() {
+  try {
+    const entry = await fetchBybitRates();
+    saveToJSON(entry);
+    saveToCSV(entry);
+    generateAnalytics();
+    console.log('✓ Monitor completed successfully');
+  } catch (error) {
+    console.error('✗ Monitor failed:', error.message);
+    process.exit(1);
+  }
+}
+
+main();
